@@ -1,4 +1,5 @@
 use crabgrab::feature::bitmap::{FrameBitmap, VideoFrameBitmap};
+use crabgrab::platform::macos::MacosCaptureConfigExt;
 use crabgrab::prelude::*;
 use std::process::Stdio;
 use tokio::sync::mpsc;
@@ -23,7 +24,9 @@ async fn main_async() {
     let filter = CapturableContentFilter::DISPLAYS;
     let content = CapturableContent::new(filter).await.unwrap();
     let display = content.displays().next().expect("No display found");
-    let config = CaptureConfig::with_display(display.clone(), CapturePixelFormat::Bgra8888);
+    let config = CaptureConfig::with_display(display.clone(), CapturePixelFormat::Bgra8888)
+        .with_buffer_count(128)
+        .with_maximum_fps(Some(FRAME_RATE as f32));
     let (tx, mut rx) = mpsc::channel(BUFFER_SIZE);
 
     tokio::spawn(async move {
@@ -34,7 +37,14 @@ async fn main_async() {
                     frame.frame_id(),
                     std::time::Instant::now()
                 );
-                let _ = tx.blocking_send(frame);
+                if let Ok(FrameBitmap::BgraUnorm8x4(image_bitmap_bgra8888)) = frame.get_bitmap() {
+                    let flat_data: Vec<u8> = image_bitmap_bgra8888
+                        .data
+                        .iter()
+                        .flat_map(|&[b, g, r, a]| vec![b, g, r, a])
+                        .collect();
+                    let _ = tx.blocking_send(flat_data);
+                }
             }
         })
         .expect("Failed to create capture stream");
@@ -81,27 +91,27 @@ async fn main_async() {
     let ffmpeg_command = ffmpeg_command.clone();
     let mut ffmpeg_process = start_ffmpeg_sidecar(ffmpeg_binary_path, &ffmpeg_command).await;
 
-    while let Some(frame) = rx.recv().await {
-        println!(
-            "ffmpeg received frame {} at {:?}",
-            frame.frame_id(),
-            std::time::Instant::now()
-        );
-        if let Ok(FrameBitmap::BgraUnorm8x4(image_bitmap_bgra8888)) = frame.get_bitmap() {
-            let flat_data: Vec<u8> = image_bitmap_bgra8888
-                .data
-                .iter()
-                .flat_map(|&[b, g, r, a]| vec![b, g, r, a])
-                .collect();
+    while let Some(flat_data) = rx.recv().await {
+        // println!(
+        //     "ffmpeg received frame {} at {:?}",
+        //     frame.frame_id(),
+        //     std::time::Instant::now()
+        // );
+        // if let Ok(FrameBitmap::BgraUnorm8x4(image_bitmap_bgra8888)) = frame.get_bitmap() {
+        //     let flat_data: Vec<u8> = image_bitmap_bgra8888
+        //         .data
+        //         .iter()
+        //         .flat_map(|&[b, g, r, a]| vec![b, g, r, a])
+        //         .collect();
 
-            ffmpeg_process
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(&flat_data)
-                .await
-                .expect("Failed to write frame to FFmpeg process");
-        }
+        ffmpeg_process
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&flat_data)
+            .await
+            .expect("Failed to write frame to FFmpeg process");
+        // }
     }
 
     ffmpeg_process
